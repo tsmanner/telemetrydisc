@@ -2,4 +2,5 @@
 
 from telemetrydisc import *
 
-loadf("../tests/LOG0.TXT")
+# loadf("../tests/LOG0.TXT")
+[loadf(f"D:/{filename}") for filename in os.listdir("D:") if filename.endswith("TXT")]
