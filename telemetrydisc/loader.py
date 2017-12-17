@@ -117,7 +117,7 @@ def find_crossings(series, cross: int = 0, direction: str = 'cross'):
 
 
 def loadf(filename: str):
-    print(f"Processing {filename}...")
+    print(f"Processing '{filename}'...")
     df = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
     df["dt"] = pd.Series(df.index, index=df.index).diff()
     for col in LOG_COLUMNS[1:]:
@@ -134,7 +134,7 @@ def loadf(filename: str):
         throw_data = df.iloc[df.index.get_loc(throw.start): df.index.get_loc(throw.end)]
         for col in ["gyroX", "gyroY", "gyroZ"]:
             create_plot(throw_data, col, throw_dir, True)
-        for col in ["accelX", "accelY"]:
+        for col in ["accelX", "accelY", "accelZ"]:
             create_plot(throw_data, col, throw_dir)
         pyplot.suptitle("composite")
         fig, gyro_axis = pyplot.subplots()
