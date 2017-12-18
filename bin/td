@@ -2,5 +2,6 @@
 
 from telemetrydisc import *
 
-logdir = "D:" if os.path.exists("D:") else os.path.join("..", "tests")
-[loadf(os.path.join(logdir, filename)) for filename in os.listdir(logdir) if filename.endswith("TXT")]
+# logdir = "D:" if os.path.exists("D:") else os.path.join("..", "tests")
+# [loadf(os.path.join(logdir, filename)) for filename in os.listdir(logdir) if filename.endswith("TXT")]
+loadf("../tests/Tom_Kerstin_6.TXT")
