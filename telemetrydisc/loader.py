@@ -4,11 +4,12 @@ Data loader for telemetry log files
 
 import collections
 from functools import reduce
+import math
 from matplotlib import pyplot
-import os
 import pandas as pd
+from scipy.optimize import curve_fit
 import statistics
-from typing import List, NamedTuple, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 ANGULAR_VELOCITY_WINDOW_SIZE = 150  # Size of the sliding window for throw detection (ms)
 ANGULAR_VELOCITY_WINDOW_THRESHOLD = 50  # Abs value mean to threshold
@@ -95,6 +96,27 @@ def find_idle(data: pd.Series, window_size: int, threshold: Union[float, int]):
     return idles
 
 
+def smooth_data(data: Union[pd.DataFrame, pd.Series], window_size: int):
+    if isinstance(data, pd.DataFrame):
+        smoothed_data = pd.DataFrame(index=data.index)
+        for column in data:
+            smoothed_data[column] = smooth_data(data[column], window_size)
+        return smoothed_data
+    else:
+        window = []  # type: List[SeriesValue]
+        smoothed_data = pd.Series(index=data.index)
+        for t in data.index:
+            window.append(SeriesValue(t, data[t]))
+            while window[-1].t - window[0].t > window_size:
+                window.pop(0)
+            if len(window) > (window_size / 10):
+                window_avg = statistics.mean([sv.value for sv in window])
+                smoothed_data[t] = window_avg
+            else:
+                smoothed_data[t] = data[t]
+        return smoothed_data
+
+
 def create_plot(data: pd.DataFrame, column: str, throw_dir: str, plot_derivative: bool = False):
     pyplot.suptitle(column)
     pyplot.plot(data[column], linewidth=1)
@@ -150,14 +172,15 @@ def get_slice(data: Union[pd.DataFrame, pd.Series],
 
 def loadf(filename: str):
     print(f"Processing '{filename}'...")
-    df = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
+    raw_data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
+    # df = smooth_data(raw_data, 25)
+    df = raw_data
     df["dt"] = pd.Series(df.index, index=df.index).diff()
     for col in LOG_COLUMNS[1:]:
         df[f"d_{col}"] = df[col].diff()
     flights = [flight for flight in find_idle(df["d_gyroZ"], 150, 5)
                if get_slice(df["gyroZ"], flight).mean() > 500]
     print(f"{len(flights)} flights detected.")
-    [print(f"    {ts}") for ts in flights]
     create_plot(df, "gyroZ", "../tests", True)
 
     pyplot.suptitle("composite")
@@ -173,78 +196,28 @@ def loadf(filename: str):
         flight_data = get_slice(df, flight)
         pyplot.suptitle("composite")
         fig, gyro_axis = pyplot.subplots()
-        gyro_axis.plot(flight_data["gyroZ"], linewidth=1)
+        # gyro_axis.plot(flight_data["gyroZ"], linewidth=1)
         accel_axis = gyro_axis.twinx()
-        accel_axis.plot(flight_data["d_accelX"], color="purple", linewidth=1)
-        accel_axis.plot(flight_data["d_accelY"], color="orange", linewidth=1)
+
+        def func(xs, a, b, t, d):
+            return [a * math.sin(b * 2 * math.pi * x + t) + d for x in xs]
+
+        a_est = flight_data["accelX"].max()
+        b_est = 1 / (pd.Series(find_crossings(flight_data["accelX"].diff()[1:])).diff().mean() * 2)
+        d_est = flight_data["accelX"].mean()
+
+        popt, pcov = curve_fit(
+            func,
+            [x for x in flight_data["accelX"].index],
+            flight_data["accelX"],
+            p0=[a_est, b_est, 0, d_est],
+        )
+
+        rpm_est = popt[1] * 60 * 1000
+        print(f"    {flight} eRPM: {round(rpm_est)}")
+
+        ideal_index = [i for i in range(flight_data.index.min(), flight_data.index.max(), 1)]
+        accel_axis.plot(flight_data["accelX"], color="red", linewidth=1)
+        accel_axis.plot(ideal_index, func(ideal_index, *popt), color="purple", linewidth=1)
         pyplot.savefig(f"../tests/composite_{flight.start}_{flight.end}.png", dpi=300, format="png")
         pyplot.clf()
-
-    exit(0)
-
-    for flight in flights:
-        flight_data = get_slice(df["d_accelX"], flight)
-        # normalized_flight_data = (flight_data - flight_data.mean()) / (flight_data.max() - flight_data.min())
-        x_zeros = find_crossings(flight_data)
-        pyplot.suptitle("accel")
-        pyplot.plot(flight_data, linewidth=1)
-        flight_data = get_slice(df["d_accelY"], flight)
-        # normalized_flight_data = (flight_data - flight_data.mean()) / (flight_data.max() - flight_data.min())
-        y_zeros = find_crossings(flight_data)
-        pyplot.plot(flight_data, linewidth=1)
-        pyplot.savefig(f"../tests/accel_{flight.start}_{flight.end}.png", dpi=300, format="png")
-        pyplot.clf()
-        rpm_est = None
-        rpm_est_x = None
-        rpm_est_y = None
-        if len(x_zeros) > 1:
-            rpm_est_x = statistics.mean([60 / (item * 2 / 1000) for item in x_zeros.diff()][1:])
-        if len(y_zeros) > 1:
-            rpm_est_y = statistics.mean([60 / (item * 2 / 1000) for item in y_zeros.diff()][1:])
-        if rpm_est_x is not None and rpm_est_x is not None:
-            rpm_est = statistics.mean([rpm_est_x, rpm_est_y])
-        elif rpm_est_x is None:
-            rpm_est = rpm_est_y
-        elif rpm_est_y is None:
-            rpm_est = rpm_est_x
-        print(rpm_est)
-
-    exit(0)
-
-    throws = isolate_throws(df)
-    out_dir = os.path.join(os.path.dirname(filename), filename.split(".")[0])
-    if not os.path.exists(out_dir):
-        os.mkdir(out_dir)
-    for throw in throws:
-        print(throw)
-        throw_dir = os.path.join(out_dir, f"graphs_{throw.start}_{throw.end}")
-        if not os.path.exists(throw_dir):
-            os.mkdir(throw_dir)
-        throw_data = df.iloc[df.index.get_loc(throw.start): df.index.get_loc(throw.end)]
-        for col in ["gyroX", "gyroY", "gyroZ"]:
-            create_plot(throw_data, col, throw_dir, True)
-        for col in ["accelX", "accelY", "accelZ"]:
-            create_plot(throw_data, col, throw_dir)
-        pyplot.suptitle("composite")
-        fig, gyro_axis = pyplot.subplots()
-        gyro_axis.plot(throw_data["gyroZ"], linewidth=1)
-
-        # accel_axis.plot(throw_data["d_gyroZ"], color="orange", linewidth=1)
-        accel_axis = gyro_axis.twinx()
-        flight_data = df.iloc[df.index.get_loc(throw.flight_start): df.index.get_loc(throw.flight_end)]
-        normalized_flight_data = (flight_data - flight_data.mean()) / (flight_data.max() - flight_data.min())
-        crossings = [x for x in find_crossings(normalized_flight_data["accelY"])]
-        d_crossings = [y - x for x, y in zip(crossings[:-1], crossings[1:])]
-        rpms = [60 / (item * 2 / 1000) for item in d_crossings]
-        if len(crossings):
-            print(f"    Crossings:   {[round(x) for x in crossings]}")
-        if len(d_crossings) != 0:
-            print(f"    dCrossings:  {[round(x) for x in d_crossings]}")
-            print(f"    Raw RPMs:    {[round(x) for x in rpms]}")
-            print(f"    Average RPM: {round(60 / (statistics.mean(d_crossings) * 2 / 1000))}")
-        # accel_axis.plot(crossings[1:], rpms, color="orange", linewidth=1)
-        accel_axis.plot(normalized_flight_data["accelX"], color="orange", linewidth=1)
-        accel_axis.plot(normalized_flight_data["accelY"], color="purple", linewidth=1)
-        pyplot.savefig(f"{throw_dir}/composite.png", dpi=300, format="png")
-        pyplot.clf()
-        print()
