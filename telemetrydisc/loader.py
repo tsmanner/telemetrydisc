@@ -3,7 +3,7 @@ Data loader for telemetry log files
 """
 
 import collections
-from functools import reduce
+from functools import partial, reduce
 import math
 from matplotlib import pyplot
 import pandas as pd
@@ -155,7 +155,8 @@ def find_crossings(series, cross: int = 0, direction: str = 'cross'):
     x2 = series.index.values[idxs+1]
     y1 = series.values[idxs]
     y2 = series.values[idxs+1]
-    return pd.Series((cross-y1)*(x2-x1)/(y2-y1) + x1)
+    crosses = (cross-y1)*(x2-x1)/(y2-y1) + x1
+    return pd.Series(crosses, crosses)
 
 
 def get_slice(data: Union[pd.DataFrame, pd.Series],
@@ -173,7 +174,6 @@ def get_slice(data: Union[pd.DataFrame, pd.Series],
 def loadf(filename: str):
     print(f"Processing '{filename}'...")
     raw_data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
-    # df = smooth_data(raw_data, 25)
     df = raw_data
     df["dt"] = pd.Series(df.index, index=df.index).diff()
     for col in LOG_COLUMNS[1:]:
@@ -183,41 +183,61 @@ def loadf(filename: str):
     print(f"{len(flights)} flights detected.")
     create_plot(df, "gyroZ", "../tests", True)
 
-    pyplot.suptitle("composite")
-    fig, gyro_axis = pyplot.subplots()
-    gyro_axis.plot(df["gyroZ"], linewidth=1)
-    accel_axis = gyro_axis.twinx()
-    accel_axis.plot(df["d_accelX"], color="purple", linewidth=1)
-    accel_axis.plot(df["d_accelY"], color="orange",linewidth=1)
-    pyplot.savefig(f"../tests/composite.png", dpi=300, format="png")
-    pyplot.clf()
-
     for flight in flights:
         flight_data = get_slice(df, flight)
-        pyplot.suptitle("composite")
-        fig, gyro_axis = pyplot.subplots()
-        # gyro_axis.plot(flight_data["gyroZ"], linewidth=1)
-        accel_axis = gyro_axis.twinx()
-
-        def func(xs, a, b, t, d):
-            return [a * math.sin(b * 2 * math.pi * x + t) + d for x in xs]
-
-        a_est = flight_data["accelX"].max()
-        b_est = 1 / (pd.Series(find_crossings(flight_data["accelX"].diff()[1:])).diff().mean() * 2)
-        d_est = flight_data["accelX"].mean()
-
-        popt, pcov = curve_fit(
-            func,
-            [x for x in flight_data["accelX"].index],
-            flight_data["accelX"],
-            p0=[a_est, b_est, 0, d_est],
-        )
-
-        rpm_est = popt[1] * 60 * 1000
-        print(f"    {flight} eRPM: {round(rpm_est)}")
-
         ideal_index = [i for i in range(flight_data.index.min(), flight_data.index.max(), 1)]
-        accel_axis.plot(flight_data["accelX"], color="red", linewidth=1)
-        accel_axis.plot(ideal_index, func(ideal_index, *popt), color="purple", linewidth=1)
-        pyplot.savefig(f"../tests/composite_{flight.start}_{flight.end}.png", dpi=300, format="png")
-        pyplot.clf()
+
+        for axis in ["accelX", "accelY"]:
+            pyplot.suptitle("composite")
+            fig, accel_axis = pyplot.subplots()
+            rpm_axis = accel_axis.twinx()
+
+            a_est = flight_data[axis].max()
+            b_est = 1 / (pd.Series(find_crossings(flight_data[axis].diff()[1:])).diff().mean() * 2)
+            d_est = flight_data[axis].mean()
+
+            ArgTup = collections.namedtuple("ArgTup", ["a", "b", "theta", "d"])
+            b_ArgTup = collections.namedtuple("ArgTup", ["c"])
+
+            def func(xs, a, b, theta, d):
+                return [a * math.sin(b * 2 * math.pi * x + theta) + d for x in xs]
+
+            popt, pcov = curve_fit(
+                func,
+                [x for x in flight_data[axis].index],
+                flight_data[axis],
+                # p0=[a_est, b_est, 0, d_est],
+                p0=[a_est, b_est, 0, d_est],
+            )
+            popt = ArgTup(*popt)
+
+            def biased_func(xs, c):
+                return [popt.a * math.sin(popt.b * 2 * math.pi * x ** (1 - c) + popt.theta) + popt.d for x in xs]
+
+            b_popt, b_pcov = curve_fit(
+                biased_func,
+                [x for x in flight_data[axis].index],
+                flight_data[axis],
+                p0=[0],
+            )
+            b_popt = b_ArgTup(*b_popt)
+
+            ideal_ys = pd.Series([x - popt.b for x in biased_func(ideal_index, *b_popt)], ideal_index)
+            crossings = find_crossings(ideal_ys.diff()[1:])
+            periods = crossings.diff().iloc[1:]
+            rpms = periods.apply(lambda x: 60 / (x * 2 / 1000))
+
+            period_est = (periods.mean() * 2) / 1000  # Seconds
+            rpm_est = 60 / period_est
+            print(f"    {flight}  Avg RPM: {round(rpm_est)}")
+
+            raw_line = accel_axis.plot(flight_data[axis] - popt.b, color="red", linewidth=1, label="Raw")
+            fit_line = accel_axis.plot(ideal_index, ideal_ys, color="purple", linewidth=1, label="Fit")
+            rpm_line = rpm_axis.plot(rpms, color="blue", linewidth=1, label="RPMs")
+
+            lns = raw_line + fit_line + rpm_line
+            labs = [l.get_label() for l in lns]
+            accel_axis.legend(lns, labs, loc=0)
+
+            pyplot.savefig(f"../tests/composite_{axis}_{flight.start}_{flight.end}.png", dpi=300, format="png")
+            pyplot.clf()
