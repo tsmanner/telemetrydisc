@@ -3,7 +3,8 @@ Data loader for telemetry log files
 """
 
 import collections
-from functools import partial, reduce
+from functools import reduce
+import os
 import math
 from matplotlib import pyplot
 import pandas as pd
@@ -172,23 +173,29 @@ def get_slice(data: Union[pd.DataFrame, pd.Series],
 
 
 def loadf(filename: str):
+    log_dir = os.path.dirname(filename)
     print(f"Processing '{filename}'...")
     raw_data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
     df = raw_data
     df["dt"] = pd.Series(df.index, index=df.index).diff()
     for col in LOG_COLUMNS[1:]:
         df[f"d_{col}"] = df[col].diff()
+    # n_gyroZ = df["d_gyroZ"]
+    # n_gyroZ = n_gyroZ[~((n_gyroZ-n_gyroZ.mean()).abs() > 3*n_gyroZ.std())]
+    # df["n_d_gyroZ"] = n_gyroZ
     flights = [flight for flight in find_idle(df["d_gyroZ"], 150, 5)
-               if get_slice(df["gyroZ"], flight).mean() > 500]
+               if get_slice(df["gyroZ"], flight).mean() > 500 and len(get_slice(df, flight)) > 50]
+    # flights = [flight for flight in find_idle(n_gyroZ, 150, 5)
+    #            if get_slice(df["gyroZ"], flight).mean() > 500 and len(get_slice(n_gyroZ, flight)) > 50]
     print(f"{len(flights)} flights detected.")
-    create_plot(df, "gyroZ", "../tests", True)
+    create_plot(df, "gyroZ", log_dir, True)
+    # create_plot(df, "n_d_gyroZ", log_dir)
 
     for flight in flights:
         flight_data = get_slice(df, flight)
         ideal_index = [i for i in range(flight_data.index.min(), flight_data.index.max(), 1)]
 
         for axis in ["accelX", "accelY"]:
-            pyplot.suptitle("composite")
             fig, accel_axis = pyplot.subplots()
             rpm_axis = accel_axis.twinx()
 
@@ -229,15 +236,20 @@ def loadf(filename: str):
 
             period_est = (periods.mean() * 2) / 1000  # Seconds
             rpm_est = 60 / period_est
-            print(f"    {flight}  Avg RPM: {round(rpm_est)}")
+            print(f"    {flight}  Avg RPM: {round(rpm_est) if not math.isnan(rpm_est) else '---'}")
 
             raw_line = accel_axis.plot(flight_data[axis] - popt.b, color="red", linewidth=1, label="Raw")
             fit_line = accel_axis.plot(ideal_index, ideal_ys, color="purple", linewidth=1, label="Fit")
-            rpm_line = rpm_axis.plot(rpms, color="blue", linewidth=1, label="RPMs")
+            lns = raw_line + fit_line
+            if math.isnan(rpm_est):
+                rpm_line = rpm_axis.plot(rpms, color="blue", linewidth=1, label="RPMs")
+                lns += rpm_line
 
-            lns = raw_line + fit_line + rpm_line
             labs = [l.get_label() for l in lns]
             accel_axis.legend(lns, labs, loc=0)
 
-            pyplot.savefig(f"../tests/composite_{axis}_{flight.start}_{flight.end}.png", dpi=300, format="png")
+            out_dir = os.path.join(log_dir, f"flight_{flight.start}_{flight.end}")
+            if not os.path.exists(out_dir):
+                os.mkdir(out_dir)
+            pyplot.savefig(os.path.join(out_dir, f"composite_{axis}.png"), dpi=300, format="png")
             pyplot.clf()
