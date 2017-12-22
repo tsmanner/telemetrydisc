@@ -2,6 +2,7 @@
 Data loader for telemetry log files
 """
 
+import binascii
 import collections
 from functools import reduce
 import os
@@ -10,6 +11,8 @@ from matplotlib import pyplot
 import pandas as pd
 from scipy.optimize import curve_fit
 import statistics
+import sqlalchemy
+import sqlalchemy.engine.url
 from typing import List, Optional, Tuple, Union
 
 ANGULAR_VELOCITY_WINDOW_SIZE = 150  # Size of the sliding window for throw detection (ms)
@@ -20,7 +23,6 @@ ANGULAR_ACCELERATION_WINDOW_THRESHOLD = 2  # Abs value mean to threshold
 SeriesValue = collections.namedtuple("SeriesValue", ["t", "value"])
 TimeSlice = collections.namedtuple("TimeSlice", ["start", "end"])
 Throw = collections.namedtuple("Throw", ["start", "flight_start", "flight_end", "end"])
-
 
 LOG_COLUMNS = [
     "timeMS",
@@ -72,7 +74,8 @@ def isolate_throws(data: pd.DataFrame):
                 max_gyroZ = max([abs(throw_gyroZ.max()), abs(throw_gyroZ.min())])
                 if max_gyroZ > 100:
                     if len(flight_candidates) != 0:
-                        flight = reduce(lambda fca, fcb: fca if fca[1] - fca[0] > fcb[1] - fcb[0] else fcb, flight_candidates)
+                        flight = reduce(lambda fca, fcb: fca if fca[1] - fca[0] > fcb[1] - fcb[0] else fcb,
+                                        flight_candidates)
                     throws.append(Throw(start, flight[0], flight[1], end))
                 start = None
                 start_flight = None
@@ -153,10 +156,10 @@ def find_crossings(series, cross: int = 0, direction: str = 'cross'):
 
     # Calculate x crossings with interpolation using formula for a line:
     x1 = series.index.values[idxs]
-    x2 = series.index.values[idxs+1]
+    x2 = series.index.values[idxs + 1]
     y1 = series.values[idxs]
-    y2 = series.values[idxs+1]
-    crosses = (cross-y1)*(x2-x1)/(y2-y1) + x1
+    y2 = series.values[idxs + 1]
+    crosses = (cross - y1) * (x2 - x1) / (y2 - y1) + x1
     return pd.Series(crosses, crosses)
 
 
@@ -172,11 +175,57 @@ def get_slice(data: Union[pd.DataFrame, pd.Series],
     return data[data.index.get_loc(start): data.index.get_loc(end)]
 
 
+def get_engine():
+    server = 'telemetry-disc-data.postgres.database.azure.com'
+    username = 'tsmanner@telemetry-disc-data'
+    password = 'aTH3n588a'
+    url = sqlalchemy.engine.url.URL("postgresql", username, password, server, 5432, "postgres")
+    engine = sqlalchemy.create_engine(url, connect_args={"sslmode": "require"})
+    return engine
+
+
+def init_db():
+    engine = get_engine()
+    con = engine.connect()
+    con.execute("CREATE TABLE IF NOT EXISTS logs(log_crc INTEGER PRIMARY KEY, log_name TEXT, log_date TIMESTAMP)")
+    meta = sqlalchemy.MetaData()
+    meta.reflect(bind=engine)
+    [print(table) for table in sorted(meta.tables)]
+    crc_table = pd.read_sql("SELECT * FROM logs", con, index_col="log_crc")
+    print(crc_table)
+
+
+def reset_db():
+    engine = get_engine()
+    con = engine.connect()
+    meta = sqlalchemy.MetaData()
+    meta.reflect(bind=engine)
+    [con.execute(f"DROP TABLE {table}") for table in meta.tables]
+
+
 def loadf(filename: str):
-    log_dir = os.path.dirname(filename)
-    print(f"Processing '{filename}'...")
-    raw_data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
-    df = raw_data
+    engine = get_engine()
+    con = engine.connect()
+    log_crc = binascii.crc32(open(filename, "rb").read()) & 0xffffffff
+    crc_table = pd.read_sql("SELECT * FROM logs", con, index_col="log_crc")
+    if log_crc not in crc_table.index:
+        print(f"Processing '{filename}({log_crc})'...")
+        import datetime
+        crc_table.loc[log_crc] = pd.Series(
+            {
+                "log_name": os.path.basename(filename),
+                "log_date": datetime.datetime.now()
+            },
+        )
+        crc_table.to_sql("logs", con, if_exists="replace")
+        data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
+        data["log_crc"] = log_crc
+        data.to_sql("raw_data", con, if_exists="append")
+
+
+def process_data(output_dir: str):
+    # df = pd.read_sql("SELECT * FROM raw_data", )
+    df = pd.DataFrame()
     df["dt"] = pd.Series(df.index, index=df.index).diff()
     for col in LOG_COLUMNS[1:]:
         df[f"d_{col}"] = df[col].diff()
@@ -188,8 +237,9 @@ def loadf(filename: str):
     # flights = [flight for flight in find_idle(n_gyroZ, 150, 5)
     #            if get_slice(df["gyroZ"], flight).mean() > 500 and len(get_slice(n_gyroZ, flight)) > 50]
     print(f"{len(flights)} flights detected.")
-    create_plot(df, "gyroZ", log_dir, True)
+    create_plot(df, "gyroZ", output_dir, True)
     # create_plot(df, "n_d_gyroZ", log_dir)
+    exit(0)
 
     for flight in flights:
         flight_data = get_slice(df, flight)

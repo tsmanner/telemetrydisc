@@ -3,6 +3,17 @@ import os
 
 from telemetrydisc import *
 
-for logdir in ["D:", "E:", os.path.join("..", "tests")]:
+# reset_db()
+# exit(0)
+
+init_db()
+
+logdirs = [
+    "D:",
+    "E:",
+    os.path.join("..", "tests"),
+    os.path.join(os.path.expanduser("~"), "Documents", "TelemetryDiskLogs")
+]
+for logdir in logdirs:
     if os.path.exists(logdir):
         [loadf(os.path.join(logdir, filename)) for filename in os.listdir(logdir) if filename.endswith("TXT")]
