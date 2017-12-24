@@ -14,6 +14,28 @@ logdirs = [
     os.path.join("..", "tests"),
     os.path.join(os.path.expanduser("~"), "Documents", "TelemetryDiskLogs")
 ]
-for logdir in logdirs:
-    if os.path.exists(logdir):
-        [loadf(os.path.join(logdir, filename)) for filename in os.listdir(logdir) if filename.endswith("TXT")]
+# for logdir in logdirs:
+#     if os.path.exists(logdir):
+#         [load_new_log(os.path.join(logdir, filename)) for filename in os.listdir(logdir) if filename.endswith("TXT")]
+
+sync_log_data()
+
+# engine = get_engine()
+# con = engine.connect()
+# engine = sqlalchemy.create_engine(f"sqlite:///{LOCAL_DB_PATH}")
+# con = engine.connect()
+# con.execute("ALTER TABLE raw_data DROP CONSTRAINT raw_data_pkey")
+# cols = con.execute("SELECT * FROM information_schema.columns WHERE table_schema='postgres' AND table_name='raw_data'").fetchall()
+# print(cols)
+# con.execute("ALTER TABLE raw_data ADD PRIMARY KEY(log_crc, timeMS)")
+
+# import pandas
+# crc_table = pandas.read_sql("SELECT * FROM logs", con, index_col="log_crc")
+# for crc in crc_table.index:
+#     pandas.read_sql(
+#         f"SELECT * FROM raw_data WHERE log_crc={crc}",
+#         con,
+#         index_col="timeMS"
+#     ).to_csv(
+#         os.path.join(LOCAL_DATA_PATH, f"{crc_table.loc[crc]['log_name']}.{crc}.TXT"),
+#     )

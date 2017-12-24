@@ -2,17 +2,13 @@
 Data loader for telemetry log files
 """
 
-import binascii
-import collections
 from functools import reduce
-import os
 import math
 from matplotlib import pyplot
 import pandas as pd
 from scipy.optimize import curve_fit
 import statistics
-import sqlalchemy
-import sqlalchemy.engine.url
+from telemetrydisc.util import *
 from typing import List, Optional, Tuple, Union
 
 ANGULAR_VELOCITY_WINDOW_SIZE = 150  # Size of the sliding window for throw detection (ms)
@@ -20,22 +16,6 @@ ANGULAR_VELOCITY_WINDOW_THRESHOLD = 50  # Abs value mean to threshold
 ANGULAR_ACCELERATION_WINDOW_SIZE = 50  # Size of the sliding window for flight detection (ms)
 ANGULAR_ACCELERATION_WINDOW_THRESHOLD = 2  # Abs value mean to threshold
 
-SeriesValue = collections.namedtuple("SeriesValue", ["t", "value"])
-TimeSlice = collections.namedtuple("TimeSlice", ["start", "end"])
-Throw = collections.namedtuple("Throw", ["start", "flight_start", "flight_end", "end"])
-
-LOG_COLUMNS = [
-    "timeMS",
-    "accelX",
-    "accelY",
-    "accelZ",
-    "gyroX",
-    "gyroY",
-    "gyroZ",
-    "magX",
-    "magY",
-    "magZ",
-]
 
 
 def isolate_throws(data: pd.DataFrame):
@@ -173,54 +153,6 @@ def get_slice(data: Union[pd.DataFrame, pd.Series],
         start = slc
         end = slc_end
     return data[data.index.get_loc(start): data.index.get_loc(end)]
-
-
-def get_engine():
-    server = 'telemetry-disc-data.postgres.database.azure.com'
-    username = 'tsmanner@telemetry-disc-data'
-    password = 'aTH3n588a'
-    url = sqlalchemy.engine.url.URL("postgresql", username, password, server, 5432, "postgres")
-    engine = sqlalchemy.create_engine(url, connect_args={"sslmode": "require"})
-    return engine
-
-
-def init_db():
-    engine = get_engine()
-    con = engine.connect()
-    con.execute("CREATE TABLE IF NOT EXISTS logs(log_crc INTEGER PRIMARY KEY, log_name TEXT, log_date TIMESTAMP)")
-    meta = sqlalchemy.MetaData()
-    meta.reflect(bind=engine)
-    [print(table) for table in sorted(meta.tables)]
-    crc_table = pd.read_sql("SELECT * FROM logs", con, index_col="log_crc")
-    print(crc_table)
-
-
-def reset_db():
-    engine = get_engine()
-    con = engine.connect()
-    meta = sqlalchemy.MetaData()
-    meta.reflect(bind=engine)
-    [con.execute(f"DROP TABLE {table}") for table in meta.tables]
-
-
-def loadf(filename: str):
-    engine = get_engine()
-    con = engine.connect()
-    log_crc = binascii.crc32(open(filename, "rb").read()) & 0xffffffff
-    crc_table = pd.read_sql("SELECT * FROM logs", con, index_col="log_crc")
-    if log_crc not in crc_table.index:
-        print(f"Processing '{filename}({log_crc})'...")
-        import datetime
-        crc_table.loc[log_crc] = pd.Series(
-            {
-                "log_name": os.path.basename(filename),
-                "log_date": datetime.datetime.now()
-            },
-        )
-        crc_table.to_sql("logs", con, if_exists="replace")
-        data = pd.read_csv(filename, names=LOG_COLUMNS, index_col="timeMS")
-        data["log_crc"] = log_crc
-        data.to_sql("raw_data", con, if_exists="append")
 
 
 def process_data(output_dir: str):
