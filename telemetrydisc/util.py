@@ -18,5 +18,5 @@ LOG_COLUMNS = [
     "magZ",
 ]
 
-LOCAL_DATA_PATH = "../data"
+LOCAL_DATA_PATH = os.path.join("..", "data")
 LOCAL_DB_PATH = os.path.join(LOCAL_DATA_PATH, "local.db")

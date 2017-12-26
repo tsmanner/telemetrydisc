@@ -8,8 +8,10 @@ from matplotlib import pyplot
 import pandas as pd
 from scipy.optimize import curve_fit
 import statistics
+from typing import Iterable, List, Optional, Tuple, Union
+
+from telemetrydisc.database import get_logs_table, get_raw_data
 from telemetrydisc.util import *
-from typing import List, Optional, Tuple, Union
 
 ANGULAR_VELOCITY_WINDOW_SIZE = 150  # Size of the sliding window for throw detection (ms)
 ANGULAR_VELOCITY_WINDOW_THRESHOLD = 50  # Abs value mean to threshold
@@ -17,8 +19,125 @@ ANGULAR_ACCELERATION_WINDOW_SIZE = 50  # Size of the sliding window for flight d
 ANGULAR_ACCELERATION_WINDOW_THRESHOLD = 2  # Abs value mean to threshold
 
 
+def process_all():
+    logs = get_logs_table()
+    for crc in logs.index:
+        process_log(crc)
 
-def isolate_throws(data: pd.DataFrame):
+
+
+import itertools
+
+
+class sliding_window:
+    def __init__(self, collection: Iterable, window: int, post_window: Optional[int] = None):
+        # if len(collection) < (window * 2 + 1):
+        #     raise ValueError("sliding_window collection must be at least (window * 2 + 1) in size")
+        self._iterator = iter(collection)
+        self._pre_window = window
+        self._post_window = window if post_window is None else post_window
+        self._pre = None
+        self._now = None
+        self._post = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._pre is None:
+            self._pre = list(itertools.islice(self._iterator, self._pre_window))
+        else:
+            self._pre.pop(0)
+            self._pre.append(self._now)
+        if self._now is None:
+            self._now = self._iterator.__next__()
+        else:
+            self._now = self._post[0]
+        if self._post is None:
+            self._post = list(itertools.islice(self._iterator, self._post_window))
+        else:
+            self._post.pop(0)
+            self._post.append(self._iterator.__next__())
+        return self._pre, self._now, self._post
+
+
+def smooth(data: pd.Series, *args, window: Optional[int] = 15, iterations: Optional[int] = None):
+    if iterations is not None:
+        smoothed = data.copy()
+        for i in range(iterations):
+            smoothed = smooth(smoothed, window=window)
+        return smoothed
+    smoothed = pd.Series()
+    for pre, now, post in sliding_window(data.iteritems(), window):
+        # Do Stuff
+        pre_mean = statistics.mean([item[1] for item in pre])
+        post_mean = statistics.mean([item[1] for item in post])
+        if pre_mean > now[1] and post_mean > now[1] or pre_mean < now[1] and post_mean < now[1]:
+            smoothed.set_value(now[0], statistics.mean([pre_mean, post_mean]))
+        else:
+            smoothed.set_value(now[0], now[1])
+    return smoothed
+
+
+def find_releases(data: pd.DataFrame):
+    releases = []  # type: List[List[Tuple[int, int]]]
+    for pre, now, post in sliding_window(data["gyroZ"].iteritems(), 10):
+        if now[1] - statistics.mean([item[1] for item in pre]) >= 500 and\
+                now[1] - statistics.mean([item[1] for item in post]) <= 250:
+            if len(releases) and len(releases[-1]) and pre[-1][0] == releases[-1][-1][0]:
+                releases[-1].append(now)
+            else:
+                releases.append([now])
+    return releases
+
+
+def find_ends(data: pd.DataFrame):
+    ends = []  # type: List[List[Tuple[int, int]]]
+    for pre, now, post in sliding_window(data["gyroZ"].iteritems(), 10):
+        if now[1] - statistics.mean([item[1] for item in pre]) <= 500 and\
+                now[1] - statistics.mean([item[1] for item in post]) >= 250:
+            if len(ends) and len(ends[-1]) and pre[-1][0] == ends[-1][-1][0]:
+                ends[-1].append(now)
+            else:
+                ends.append([now])
+    return ends
+
+
+def process_log(log_crc: int):
+    log_data = get_raw_data(log_crc)
+    s_log_data = pd.DataFrame()
+    s_log_data["gyroZ"] = smooth(log_data["gyroZ"], window=10, iterations=3)
+    s_log_data["accelX"] = smooth(log_data["accelX"])
+    s_log_data["accelY"] = smooth(log_data["accelY"])
+    releases = [item[-1][0] for item in find_releases(s_log_data)]
+
+    flights = []
+    for n, release_range in enumerate(zip(releases, releases[1:] + [None])):
+        ends = [item[0][0] for item in find_ends(s_log_data.loc[release_range[0]:release_range[1]])]
+        print(f"Flight Candidate {n+1:>2}: {release_range[0]}-{ends[0]}")
+        # print(f"Release Candidate {n+1:>2}: {release_range[0]}")
+        # print(f"    End Candidate {n+1:>2}: {ends[0]}")
+        flights.append((release_range[0], ends[0]))
+
+    # exit()
+
+    for flight in flights:
+        output_directory = os.path.join(LOCAL_DATA_PATH, f"{log_crc}")
+        if not os.path.exists(output_directory):
+            os.mkdir(output_directory)
+        fig, l_axis = pyplot.subplots()
+        r_axis = l_axis.twinx()
+        pyplot.suptitle("gyroZ")
+        l_axis.plot(s_log_data["gyroZ"].loc[flight[0]:flight[1]], linewidth=1)
+        l_axis.plot(s_log_data["gyroZ"].diff().loc[flight[0]:flight[1]], linewidth=1)
+        r_axis.plot(log_data["accelX"].loc[flight[0]:flight[1]], linewidth=1, color="g")
+        r_axis.plot(log_data["accelY"].loc[flight[0]:flight[1]], linewidth=1, color="brown")
+        fig.savefig(os.path.join(output_directory, f"gyroZ_{flight[0]}_{flight[1]}.png"), dpi=300, format="png")
+        pyplot.close(fig)
+        # pyplot.clf()
+
+
+def isolate_flights(data: pd.DataFrame):
     start = None
     start_flight = None
     end_flight = None
